@@ -1,0 +1,148 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# Dockerfile.prod — CPU-only production image for ROS2_Docker_UI
+# -----------------------------------------------------------------------------
+# Three build targets, selected via `docker build --target ...` or compose:
+#
+#   web-build : node image that compiles the Vite static bundle (intermediate)
+#   app       : nginx:alpine serving the built frontend on port 80
+#   ros       : ROS 2 (CPU) image with rosbridge_server + angy_sim_topics
+#
+# Notes:
+#   - No NVIDIA / CUDA / GPU runtime, no RViz, no Gazebo, no GUI deps.
+#   - No HOST_UID / HOST_GID build args. The workspace is baked into the
+#     image — production does not bind-mount source code.
+#   - Frontend env vars are baked at build time (Vite inlines `VITE_*`),
+#     so changing the rosbridge URL requires a rebuild.
+# =============================================================================
+
+ARG ROS_DISTRO=humble
+ARG NODE_VERSION=20
+
+# -----------------------------------------------------------------------------
+# Stage 1 — web-build: build the Vite frontend (ros2_ws/angy_sim_ros2/dist)
+# -----------------------------------------------------------------------------
+FROM node:${NODE_VERSION}-bookworm-slim AS web-build
+
+WORKDIR /web
+
+# Build-time configuration baked into the static bundle. Vite inlines any
+# variable prefixed with `VITE_` available at build time. These are NOT
+# runtime-configurable from the browser.
+ARG VITE_TRANSPORT_KIND=rosbridge
+ARG VITE_ROSBRIDGE_URL=ws://localhost:9090
+ENV VITE_TRANSPORT_KIND=${VITE_TRANSPORT_KIND} \
+    VITE_ROSBRIDGE_URL=${VITE_ROSBRIDGE_URL}
+
+# Copy lockfile + manifest first so `npm ci` is cached unless deps change.
+COPY ros2_ws/angy_sim_ros2/package.json \
+    ros2_ws/angy_sim_ros2/package-lock.json \
+    ./
+RUN npm ci --no-audit --no-fund
+
+# Copy the rest of the frontend sources and build the production bundle.
+#
+# We deliberately call `vite build` directly instead of `npm run build`. The
+# `build` script in package.json is `tsc -b && vite build`, where the `tsc -b`
+# step does a strict TypeScript typecheck of the whole project (including
+# *.test.ts files and strict flags like `erasableSyntaxOnly` /
+# `noUnusedLocals`). Type errors in source or tests will abort the build —
+# even though Vite itself never uses tsc and would emit a perfectly working
+# bundle. Typechecking belongs in CI as a separate, parallel job (see
+# `npm run typecheck` once added). Production builds should only care about
+# producing the runtime artifact, not about lint-style type strictness.
+COPY ros2_ws/angy_sim_ros2/ ./
+RUN npx vite build
+
+# -----------------------------------------------------------------------------
+# Stage 2 — app: nginx serving the static SPA bundle on :80
+# -----------------------------------------------------------------------------
+FROM nginx:1.27-alpine AS app
+
+# Replace the default site with a single-page-app friendly config.
+RUN rm -f /etc/nginx/conf.d/default.conf
+COPY <<'NGINX_CONF' /etc/nginx/conf.d/default.conf
+server {
+    listen      80;
+    server_name _;
+
+    root        /usr/share/nginx/html;
+    index       index.html;
+
+    # Caddy gzips at the edge already; this gzip is for direct curl/healthcheck
+    # against the container.
+    gzip            on;
+    gzip_types      text/plain text/css application/json application/javascript
+                    application/wasm image/svg+xml;
+    gzip_min_length 1024;
+
+    # SPA fallback — let the React router resolve unknown paths.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+NGINX_CONF
+
+COPY --from=web-build /web/dist /usr/share/nginx/html
+
+EXPOSE 80
+# Default nginx CMD (`nginx -g "daemon off;"`) is fine.
+
+# -----------------------------------------------------------------------------
+# Stage 3 — ros: CPU-only ROS 2 + rosbridge + angy_sim_topics workspace
+# -----------------------------------------------------------------------------
+FROM ros:${ROS_DISTRO}-ros-base AS ros
+
+# Re-declare ARG so it is visible inside this stage (multi-stage scoping).
+ARG ROS_DISTRO
+ENV ROS_DISTRO=${ROS_DISTRO} \
+    DEBIAN_FRONTEND=noninteractive \
+    ROS_WORKSPACE=/home/ros/ros2_ws
+
+# Runtime ROS deps for the demo:
+#   - rosbridge-suite          : rosbridge_server + rosapi (web_test.launch.py)
+#   - colcon-common-extensions : build the workspace overlay
+# We deliberately skip rqt / rviz / gazebo / nav2 / slam-toolbox to keep the
+# image small and headless. rclcpp / std_msgs / launch / launch_ros come with
+# `ros-base`.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ros-${ROS_DISTRO}-rosbridge-suite \
+    python3-colcon-common-extensions \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+# Non-root runtime user. Production does not need host UID/GID alignment
+# because there are no bind mounts.
+RUN groupadd --system ros \
+    && useradd  --system --create-home --gid ros --shell /bin/bash ros
+
+# Pre-create the workspace dir and chown it to the runtime user BEFORE
+# the WORKDIR / USER switch. Without this, `WORKDIR ${ROS_WORKSPACE}` runs
+# while we're still root, creates /home/ros/ros2_ws owned by root, and the
+# colcon build (run as `ros`) then fails with EACCES trying to mkdir `log/`
+# and `build/` inside it. Chowning all of /home/ros also covers the
+# `colcon` cache directory (~/.colcon) that colcon-core writes to.
+RUN mkdir -p ${ROS_WORKSPACE} && chown -R ros:ros /home/ros
+
+# Copy only the source we ship in this demo image. Keeping the workspace
+# narrow keeps the image small and the colcon build deterministic.
+WORKDIR ${ROS_WORKSPACE}
+COPY --chown=ros:ros ros2_ws/src/angy_sim_topics ./src/angy_sim_topics
+
+# Build the overlay workspace as the runtime user.
+USER ros
+RUN bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash \
+    && colcon build \
+    --merge-install \
+    --cmake-args -DCMAKE_BUILD_TYPE=Release"
+
+# Make interactive `docker exec` shells source ROS automatically.
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash"        >> /home/ros/.bashrc \
+    && echo "source ${ROS_WORKSPACE}/install/setup.bash"      >> /home/ros/.bashrc
+
+EXPOSE 9090
+
+# Default command runs the demo launch file. compose.prod.yml can override.
+# We use bash -lc so `${ROS_DISTRO}` and `${ROS_WORKSPACE}` are expanded by
+# the shell at container start. `exec` replaces the shell with ros2 so signals
+# (SIGTERM on `docker stop`) reach the launch process directly.
+CMD ["bash", "-lc", "source /opt/ros/${ROS_DISTRO}/setup.bash && source ${ROS_WORKSPACE}/install/setup.bash && exec ros2 launch angy_sim_topics web_test.launch.py"]

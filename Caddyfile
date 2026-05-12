@@ -1,0 +1,40 @@
+# =============================================================================
+# Caddyfile — public HTTPS entrypoint for ROS2_Docker_UI
+# -----------------------------------------------------------------------------
+# Caddy automatically obtains and renews TLS certs from Let's Encrypt for the
+# domain in $APP_DOMAIN. WebSocket upgrade for /rosbridge is handled by
+# `reverse_proxy` automatically (no extra directives needed).
+# =============================================================================
+
+{$APP_DOMAIN} {
+    encode gzip
+
+    # -------------------------------------------------------------------------
+    # OPTIONAL: gate the entire site behind HTTP Basic Auth for private demos.
+    # Generate a hash with:
+    #     docker run --rm caddy:2 caddy hash-password --plaintext 'your-password'
+    # Then uncomment and replace the placeholder hash below.
+    # -------------------------------------------------------------------------
+    # basicauth {
+    #     demo-user $2a$14$REPLACE_WITH_HASH_FROM_CADDY_HASH_PASSWORD
+    # }
+
+    # rosbridge WebSocket — strip the /rosbridge prefix and forward to the
+    # ros service on the internal compose network. Caddy negotiates the
+    # WebSocket upgrade transparently.
+    handle_path /rosbridge* {
+        reverse_proxy ros:9090
+    }
+
+    # Everything else -> static frontend (nginx).
+    handle {
+        reverse_proxy app:80
+    }
+
+    # Reasonable default logging. Caddy logs to stdout by default when run
+    # in a container, so `docker compose logs -f caddy` shows access logs.
+    log {
+        output stdout
+        format console
+    }
+}

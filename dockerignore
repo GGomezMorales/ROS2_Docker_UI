@@ -1,0 +1,48 @@
+# =============================================================================
+# .dockerignore — keep the production build context small and reproducible.
+# Applies to ALL `docker build` invocations in this repo, including the
+# development Dockerfile (the dev image rebuilds the workspace inside the
+# container, so excluding host build artifacts here is safe).
+# =============================================================================
+
+# Version control
+.git
+.gitignore
+.gitattributes
+.github
+
+# Editor / OS
+.vscode
+.idea
+.DS_Store
+*.swp
+*.swo
+
+# Node / frontend build artifacts (re-built inside the web-build stage)
+node_modules
+**/node_modules
+ros2_ws/angy_sim_ros2/dist
+ros2_ws/angy_sim_ros2/.vite
+ros2_ws/angy_sim_ros2/.env
+ros2_ws/angy_sim_ros2/.env.local
+ros2_ws/angy_sim_ros2/.env.*.local
+
+# Colcon build artifacts (re-built inside the ros stage)
+ros2_ws/build
+ros2_ws/install
+ros2_ws/log
+
+# Python caches
+**/__pycache__
+**/*.pyc
+
+# Local debug artifacts that ship in the repo root
+trajectory-debug-*.json
+three-trajectory-renderer-debug-*.json
+ros2_ws/frames_*.gv
+ros2_ws/frames_*.pdf
+
+# Production secrets — never bake these into an image
+.env
+.env.prod
+.env.local

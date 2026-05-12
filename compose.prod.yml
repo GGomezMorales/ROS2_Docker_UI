@@ -1,0 +1,68 @@
+# =============================================================================
+# compose.prod.yml — production stack for ROS2_Docker_UI
+# -----------------------------------------------------------------------------
+# Run with:
+#
+#   cp .env.prod.example .env.prod   # then edit APP_DOMAIN / VITE_ROSBRIDGE_URL
+#   docker compose --env-file .env.prod -f compose.prod.yml build
+#   docker compose --env-file .env.prod -f compose.prod.yml up -d
+#
+# Public surface:
+#   80, 443     -> caddy (TLS termination, reverse proxy)
+#   /           -> app   (nginx static SPA)
+#   /rosbridge  -> ros   (rosbridge_server WebSocket on internal :9090)
+#
+# Port 9090 is intentionally NOT published to the host. rosbridge is only
+# reachable through Caddy on the public domain.
+# =============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+      target: app
+      args:
+        # These are baked into the static bundle at build time.
+        VITE_TRANSPORT_KIND: ${VITE_TRANSPORT_KIND:-rosbridge}
+        VITE_ROSBRIDGE_URL:  ${VITE_ROSBRIDGE_URL}
+    image: ros2_docker_ui_app:latest
+    restart: unless-stopped
+    expose:
+      - "80"
+
+  ros:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+      target: ros
+    image: ros2_docker_ui_ros:latest
+    restart: unless-stopped
+    # Reachable only on the internal compose network. NOT published to host.
+    expose:
+      - "9090"
+    # The Dockerfile CMD already runs:
+    #   ros2 launch angy_sim_topics web_test.launch.py
+    # Override here if you need a different launch file.
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # Caddy uses 443/udp for HTTP/3; uncomment if you want it.
+      # - "443:443/udp"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+      - ros
+
+volumes:
+  caddy_data:
+  caddy_config:

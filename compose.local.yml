@@ -1,0 +1,48 @@
+# =============================================================================
+# compose.local.yml — local-machine test variant of the production stack
+# -----------------------------------------------------------------------------
+# Same images as compose.prod.yml (so we're validating the exact build that
+# will run in production), but:
+#
+#   - NO Caddy. We don't have a public domain on localhost, so Let's Encrypt
+#     would fail. We expose `app` and `ros` directly on the host instead.
+#   - The frontend bundle is built with VITE_ROSBRIDGE_URL=ws://localhost:9090
+#     so your browser talks to rosbridge directly (not through a TLS proxy).
+#
+# Run with:
+#
+#   docker compose -f compose.local.yml build
+#   docker compose -f compose.local.yml up
+#
+# Then open http://localhost:8080 in your browser.
+# Tear down with Ctrl+C and `docker compose -f compose.local.yml down`.
+# =============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+      target: app
+      args:
+        VITE_TRANSPORT_KIND: rosbridge
+        # Browser hits ws://localhost:9090 — see `ros` service below.
+        VITE_ROSBRIDGE_URL: ws://localhost:9090
+    image: ros2_docker_ui_app:local
+    restart: unless-stopped
+    ports:
+      # Host:Container — nginx serves on :80 inside, we map to :8080 outside
+      # so it doesn't fight with anything else running on port 80 locally.
+      - "8080:80"
+
+  ros:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+      target: ros
+    image: ros2_docker_ui_ros:local
+    restart: unless-stopped
+    ports:
+      # rosbridge — published to host so the browser can reach it on :9090.
+      # In production this port is NOT published (only Caddy can reach it).
+      - "9090:9090"
