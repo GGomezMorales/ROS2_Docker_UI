@@ -70,3 +70,8 @@ ros2_ws/three.js/
 package-lock.json
 
 # End of https://www.toptal.com/developers/gitignore/api/ros
+
+.env
+.env.local
+.env.prod
+.env.*.local
