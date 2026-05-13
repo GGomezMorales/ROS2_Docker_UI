@@ -126,7 +126,7 @@ RUN mkdir -p ${ROS_WORKSPACE} && chown -R ros:ros /home/ros
 # Copy only the source we ship in this demo image. Keeping the workspace
 # narrow keeps the image small and the colcon build deterministic.
 WORKDIR ${ROS_WORKSPACE}
-COPY --chown=ros:ros ros2_ws/src/angy_sim_topics ./src/angy_sim_topics
+COPY --chown=ros:ros ros2_ws/src ./src
 
 # Build the overlay workspace as the runtime user.
 USER ros
